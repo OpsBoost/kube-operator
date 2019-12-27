@@ -16,7 +16,7 @@ spec:
       containers:
         - name: kube-operator
           # Replace this with the built image name
-          image: quay.io/opsboost/kube-operator
+          image: quay.io/opsboost/kube-operator:v0.0.1
           command:
           - kube-operator
           imagePullPolicy: Always
