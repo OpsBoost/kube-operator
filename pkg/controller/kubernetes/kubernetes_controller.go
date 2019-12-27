@@ -136,6 +136,8 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		"kubernetes": cr.Name,
 	}
 
+	podVolumes := []corev1.Volume{}
+
 	kubernetesApiServer := corev1.Container{
 		Name:    "kube-apiserver",
 		Image:   fmt.Sprintf("k8s.gcr.io/hyperkube:v%s", cr.Spec.Version),
@@ -160,9 +162,41 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		},
 	}
 
+	etcdCommand := []string{"etcd","grpc-proxy","start","--listen-addr=127.0.0.1:2379",fmt.Sprintf("--endpoints=%s.%s:2380",cr.Spec.EtcdService,cr.Namespace)}
+	etcdVolumes := []corev1.VolumeMount{}
+
+	if cr.Spec.EtcdNamespace != "" {
+		etcdCommand = append(etcdCommand,fmt.Sprintf("--namespace=%s",cr.Spec.EtcdNamespace))
+	} else {
+		etcdCommand = append(etcdCommand,fmt.Sprintf("--namespace=%s",cr.Name))
+	}
+
+	if cr.Spec.EtcdPeerSecretRef != "" {
+		volumeName := "etcd-peer-tls"
+		podVolumes = append(podVolumes,corev1.Volume{
+			Name:         volumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret:   &corev1.SecretVolumeSource{
+					SecretName:  cr.Spec.EtcdPeerSecretRef,
+				},
+			},
+		})
+		etcdVolumes = append(etcdVolumes,corev1.VolumeMount{
+			Name:             volumeName,
+			ReadOnly:         true,
+			MountPath:        fmt.Sprintf("/%s",volumeName),
+		})
+		etcdCommand = append(etcdCommand,fmt.Sprintf("--cert-file=/%s/peer.crt",volumeName))
+		etcdCommand = append(etcdCommand,fmt.Sprintf("--key-file=/%s/peer.key",volumeName))
+		etcdCommand = append(etcdCommand,fmt.Sprintf("--trusted-ca-file=/%s/peer-ca.crt",volumeName))
+	}
+
+
 	etcdProxy := corev1.Container{
 		Name: "etcd",
 		Image: "quay.io/coreos/etcd:v3.4.3",
+		Command: etcdCommand,
+		VolumeMounts: etcdVolumes,
 	}
 
 
@@ -173,6 +207,7 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 			Labels:    labels,
 		},
 		Spec: corev1.PodSpec{
+			Volumes: podVolumes,
 			Containers: []corev1.Container{
 				kubernetesApiServer,
 				etcdProxy,

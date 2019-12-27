@@ -14,7 +14,7 @@ type KubernetesSpec struct {
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
 	Version           string `json:"version,omitempty"`
 	EtcdNamespace     string `json:"etcdNamespace,omitempty"`
-	EtcdService       string `json:"etcdService,omitempty"`
+	EtcdService       string `json:"etcdService"`
 	EtcdPeerSecretRef string `json:"etcdPeerSecretRef,omitempty"`
 }
 
