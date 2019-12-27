@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"fmt"
 
 	appv1alpha1 "github.com/opsboost/kube-operator/pkg/apis/app/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -129,23 +130,45 @@ func (r *ReconcileKubernetes) Reconcile(request reconcile.Request) (reconcile.Re
 	return reconcile.Result{}, nil
 }
 
-// newPodForCR returns a busybox pod with the same name/namespace as the cr
+// newPodForCR returns a integrated kubernetes control plane pod with the same name/namespace as the cr
 func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 	labels := map[string]string{
-		"app": cr.Name,
+		"kubernetes": cr.Name,
 	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cr.Name + "-pod",
+			Name:      cr.Name,
 			Namespace: cr.Namespace,
 			Labels:    labels,
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
-					Name:    "busybox",
-					Image:   "busybox",
-					Command: []string{"sleep", "3600"},
+					Name:    "kube-apiserver",
+					Image:   fmt.Sprintf("k8s.gcr.io/hyperkube:v%s",cr.Spec.Version),
+					Command: []string{"kube-apiserver", "--etcd-servers=http://localhost:2379","--authorization-mode=AlwaysAllow"},
+					Env: []corev1.EnvVar{
+						{
+							Name:      "KUBERNETES_SERVICE_HOST",
+						},
+						{
+							Name:      "KUBERNETES_SERVICE_PORT",
+						},
+						{
+							Name:      "KUBERNETES_SERVICE_HTTPS_PORT",
+						},
+					},
+					Ports:[]corev1.ContainerPort{
+						{
+							Name:          "api",
+							ContainerPort: 6443,
+							Protocol:      "TCP",
+						},
+					},
+				},
+				{
+					Name: "etcd",
+					Image: "quay.io/coreos/etcd:v3.4.3",
 				},
 			},
 		},
