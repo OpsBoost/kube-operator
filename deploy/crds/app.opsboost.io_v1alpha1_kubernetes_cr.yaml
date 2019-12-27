@@ -1,0 +1,7 @@
+apiVersion: app.opsboost.io/v1alpha1
+kind: Kubernetes
+metadata:
+  name: example-kubernetes
+spec:
+  # Add fields here
+  size: 3
