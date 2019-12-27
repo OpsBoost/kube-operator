@@ -1,7 +1,9 @@
 apiVersion: app.opsboost.io/v1alpha1
 kind: Kubernetes
 metadata:
-  name: example-kubernetes
+  name: poddernetes
 spec:
   # Add fields here
-  size: 3
+  etcdService: example
+  version: 1.17.0
+  etcdPeerSecretRef: etcd-peer-tls
