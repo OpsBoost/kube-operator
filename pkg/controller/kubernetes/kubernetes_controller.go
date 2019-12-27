@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"context"
 	"fmt"
-
 	appv1alpha1 "github.com/opsboost/kube-operator/pkg/apis/app/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -162,7 +161,7 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		},
 	}
 
-	etcdCommand := []string{"etcd","grpc-proxy","start","--listen-addr=127.0.0.1:2379",fmt.Sprintf("--endpoints=%s.%s:2380",cr.Spec.EtcdService,cr.Namespace)}
+	etcdCommand := []string{"etcd","grpc-proxy","start","--listen-addr=127.0.0.1:2379",fmt.Sprintf("--endpoints=%s.%s.svc:2380",cr.Spec.EtcdService,cr.Namespace)}
 	etcdVolumes := []corev1.VolumeMount{}
 
 	if cr.Spec.EtcdNamespace != "" {
