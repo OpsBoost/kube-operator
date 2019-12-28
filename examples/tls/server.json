@@ -1,0 +1,20 @@
+{
+    "CN": "etcd server",
+    "hosts": [
+        "*.etcd.default.svc",
+        "etcd-client.default.svc",
+        "localhost"
+    ],
+    "key": {
+        "algo": "rsa",
+        "size": 2048
+    },
+    "names": [
+        {
+            "C": "DE",
+            "L": "B",
+            "ST": "Berlin"
+        }
+    ]
+}
+
