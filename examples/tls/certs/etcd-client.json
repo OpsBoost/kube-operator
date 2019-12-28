@@ -1,5 +1,5 @@
 {
-    "CN": "etcd client",
+    "CN": "",
     "hosts": [""],
     "key": {
         "algo": "rsa",

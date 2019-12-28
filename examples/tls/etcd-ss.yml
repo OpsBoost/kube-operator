@@ -33,6 +33,18 @@ spec:
         component: "etcd"
     spec:
       volumes:
+        - name: member-peer-tls
+          secret:
+            defaultMode: 420
+            secretName: etcd-peer-tls
+        - name: member-server-tls
+          secret:
+            defaultMode: 420
+            secretName: etcd-server-tls
+        - name: etcd-client-tls
+          secret:
+            defaultMode: 420
+            secretName: etcd-client-tls
         - emptyDir: {}
           name: etcd-data
       containers:
@@ -55,6 +67,12 @@ spec:
         volumeMounts:
           - mountPath: /var/etcd
             name: etcd-data
+          - mountPath: /etc/etcdtls/member/peer-tls
+            name: member-peer-tls
+          - mountPath: /etc/etcdtls/member/server-tls
+            name: member-server-tls
+          - mountPath: /etc/etcdtls/operator/etcd-tls
+            name: etcd-client-tls
         command:
           - "/bin/sh"
           - "-ecx"
@@ -86,6 +104,14 @@ spec:
               --initial-cluster-token etcd-cluster-1 \
               --initial-cluster ${PEERS} \
               --initial-cluster-state new \
-              --data-dir /var/run/etcd/default.etcd 
+              --data-dir /var/run/etcd/default.etcd \
+              --peer-client-cert-auth=true \
+              --peer-trusted-ca-file=/etc/etcdtls/member/peer-tls/peer-ca.crt \
+              --peer-cert-file=/etc/etcdtls/member/peer-tls/peer.crt \
+              --peer-key-file=/etc/etcdtls/member/peer-tls/peer.key \
+              --client-cert-auth=true \
+              --trusted-ca-file=/etc/etcdtls/member/server-tls/server-ca.crt \
+              --cert-file=/etc/etcdtls/member/server-tls/server.crt \
+              --key-file=/etc/etcdtls/member/server-tls/server.key
 
 ---
