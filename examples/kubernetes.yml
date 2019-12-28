@@ -1,0 +1,8 @@
+apiVersion: app.opsboost.io/v1alpha1
+kind: Kubernetes
+metadata:
+  name: "test"
+  annotations:
+spec:
+  version: 1.17.0
+  etcdService: etcd

@@ -164,7 +164,7 @@ func (r *ReconcileKubernetes) Reconcile(request reconcile.Request) (reconcile.Re
 	return reconcile.Result{}, nil
 }
 
-func getServiceForServiceName(serviceName string, namespace string, kubecli kubernetes.Interface) (*corev1.Service, error) {
+func getSvc(serviceName string, namespace string, kubecli kubernetes.Interface) (*corev1.Service, error) {
 	listOptions := metav1.ListOptions{}
 	svcs, err := kubecli.CoreV1().Services(namespace).List(listOptions)
 	if err != nil {
@@ -232,20 +232,20 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 	}
 
 	kubecli := MustNewKubeClient()
-	etcdService, _ := getServiceForServiceName(cr.Spec.EtcdService, etcdServiceNs, kubecli)
+	etcdService, _ := getSvc(cr.Spec.EtcdService, etcdServiceNs, kubecli)
 	etcdPods, _ := getPodsForSvc(etcdService, etcdServiceNs, kubecli)
 
-	etcdCommand := []string{"etcd", "grpc-proxy", "start", "--listen-addr=127.0.0.1:2379", "--endpoints="}
+	etcdCommand := []string{"etcd", "grpc-proxy", "start", "--listen-addr=127.0.0.1:2379"}
 
 	etcdPeers := []string{}
 
 	for _, pod := range etcdPods.Items {
-		etcdPeers = append(etcdPeers, fmt.Sprintf("%s%s.svc:2379", pod.Name, pod.Namespace))
+		fmt.Fprintf(os.Stdout, "pod name: %v\n", pod.Name)
+		etcdPeers = append(etcdPeers, fmt.Sprintf("%s.%s.svc:2379", pod.Name, pod.Namespace))
 	}
 
-	etcdCommand = append(etcdCommand, strings.Join(etcdPeers, ","))
+	etcdCommand = append(etcdCommand, "--endpoints=%s", strings.Join(etcdPeers, ","))
 
-	//etcdCommand = []string{"etcd", "grpc-proxy", "start", "--listen-addr=127.0.0.1:2379", fmt.Sprintf("--endpoints=%s.%s.svc:2379", cr.Spec.EtcdService, cr.Namespace)}
 	etcdVolumes := []corev1.VolumeMount{}
 
 	if cr.Spec.EtcdNamespace != "" {
