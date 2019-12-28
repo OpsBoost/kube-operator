@@ -161,7 +161,7 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		},
 	}
 
-	etcdCommand := []string{"etcd","grpc-proxy","start","--listen-addr=127.0.0.1:2379",fmt.Sprintf("--endpoints=%s.%s.svc:2380",cr.Spec.EtcdService,cr.Namespace)}
+	etcdCommand := []string{"etcd","grpc-proxy","start","--listen-addr=127.0.0.1:2379",fmt.Sprintf("--endpoints=%s.%s.svc:2379",cr.Spec.EtcdService,cr.Namespace)}
 	etcdVolumes := []corev1.VolumeMount{}
 
 	if cr.Spec.EtcdNamespace != "" {
@@ -185,9 +185,9 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 			ReadOnly:         true,
 			MountPath:        fmt.Sprintf("/%s",volumeName),
 		})
-		etcdCommand = append(etcdCommand,fmt.Sprintf("--cert-file=/%s/peer.crt",volumeName))
-		etcdCommand = append(etcdCommand,fmt.Sprintf("--key-file=/%s/peer.key",volumeName))
-		etcdCommand = append(etcdCommand,fmt.Sprintf("--trusted-ca-file=/%s/peer-ca.crt",volumeName))
+		etcdCommand = append(etcdCommand,fmt.Sprintf("--cert=/%s/peer.crt",volumeName))
+		etcdCommand = append(etcdCommand,fmt.Sprintf("--key=/%s/peer.key",volumeName))
+		etcdCommand = append(etcdCommand,fmt.Sprintf( "--cacert=/%s/peer-ca.crt",volumeName))
 	}
 
 
