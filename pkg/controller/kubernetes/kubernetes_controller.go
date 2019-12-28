@@ -3,12 +3,19 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
+	"strings"
+
 	appv1alpha1 "github.com/opsboost/kube-operator/pkg/apis/app/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -20,6 +27,34 @@ import (
 )
 
 var log = logf.Log.WithName("controller_kubernetes")
+
+func MustNewKubeClient() kubernetes.Interface {
+	cfg, err := InClusterConfig()
+	if err != nil {
+		panic(err)
+	}
+	return kubernetes.NewForConfigOrDie(cfg)
+}
+
+func InClusterConfig() (*rest.Config, error) {
+	// Work around https://github.com/kubernetes/kubernetes/issues/40973
+	// See https://github.com/coreos/etcd-operator/issues/731#issuecomment-283804819
+	if len(os.Getenv("KUBERNETES_SERVICE_HOST")) == 0 {
+		addrs, err := net.LookupHost("kubernetes.default.svc")
+		if err != nil {
+			panic(err)
+		}
+		os.Setenv("KUBERNETES_SERVICE_HOST", addrs[0])
+	}
+	if len(os.Getenv("KUBERNETES_SERVICE_PORT")) == 0 {
+		os.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	}
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
 /**
 * USER ACTION REQUIRED: This is a scaffold file intended for the user to modify with their own Controller
@@ -129,6 +164,34 @@ func (r *ReconcileKubernetes) Reconcile(request reconcile.Request) (reconcile.Re
 	return reconcile.Result{}, nil
 }
 
+func getServiceForServiceName(serviceName string, namespace string, kubecli kubernetes.Interface) (*corev1.Service, error) {
+	listOptions := metav1.ListOptions{}
+	svcs, err := kubecli.CoreV1().Services(namespace).List(listOptions)
+	if err != nil {
+		log.Error(err, "Service not found")
+	}
+	for _, svc := range svcs.Items {
+		if strings.Contains(svc.Name, serviceName) {
+			fmt.Fprintf(os.Stdout, "service name: %v\n", svc.Name)
+			return &svc, nil
+		}
+	}
+	return nil, errors.NewBadRequest("cannot find service for deployment")
+}
+
+func getPodsForSvc(svc *corev1.Service, namespace string, kubecli kubernetes.Interface) (*corev1.PodList, error) {
+	set := labels.Set(svc.Spec.Selector)
+	listOptions := metav1.ListOptions{LabelSelector: set.AsSelector().String()}
+	pods, err := kubecli.CoreV1().Pods(namespace).List(listOptions)
+	if err != nil {
+		log.Error(err, "Pods not found")
+	}
+	for _, pod := range pods.Items {
+		fmt.Fprintf(os.Stdout, "pod name: %v\n", pod.Name)
+	}
+	return pods, nil
+}
+
 // newPodForCR returns a integrated kubernetes control plane pod with the same name/namespace as the cr
 func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 	labels := map[string]string{
@@ -161,43 +224,62 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		},
 	}
 
-	etcdCommand := []string{"etcd","grpc-proxy","start","--listen-addr=127.0.0.1:2379",fmt.Sprintf("--endpoints=%s.%s.svc:2379",cr.Spec.EtcdService,cr.Namespace)}
+	var etcdServiceNs string
+	if cr.Spec.EtcdServiceNamespace != "" {
+		etcdServiceNs = "default"
+	} else {
+		etcdServiceNs = cr.Spec.EtcdServiceNamespace
+	}
+
+	kubecli := MustNewKubeClient()
+	etcdService, _ := getServiceForServiceName(cr.Spec.EtcdService, etcdServiceNs, kubecli)
+	etcdPods, _ := getPodsForSvc(etcdService, etcdServiceNs, kubecli)
+
+	etcdCommand := []string{"etcd", "grpc-proxy", "start", "--listen-addr=127.0.0.1:2379", "--endpoints="}
+
+	etcdPeers := []string{}
+
+	for _, pod := range etcdPods.Items {
+		etcdPeers = append(etcdPeers, fmt.Sprintf("%s%s.svc:2379", pod.Name, pod.Namespace))
+	}
+
+	etcdCommand = append(etcdCommand, strings.Join(etcdPeers, ","))
+
+	//etcdCommand = []string{"etcd", "grpc-proxy", "start", "--listen-addr=127.0.0.1:2379", fmt.Sprintf("--endpoints=%s.%s.svc:2379", cr.Spec.EtcdService, cr.Namespace)}
 	etcdVolumes := []corev1.VolumeMount{}
 
 	if cr.Spec.EtcdNamespace != "" {
-		etcdCommand = append(etcdCommand,fmt.Sprintf("--namespace=%s",cr.Spec.EtcdNamespace))
+		etcdCommand = append(etcdCommand, fmt.Sprintf("--namespace=%s", cr.Spec.EtcdNamespace))
 	} else {
-		etcdCommand = append(etcdCommand,fmt.Sprintf("--namespace=%s",cr.Name))
+		etcdCommand = append(etcdCommand, fmt.Sprintf("--namespace=%s", cr.Name))
 	}
 
-	if cr.Spec.EtcdPeerSecretRef != "" {
+	if cr.Spec.EtcdClientSecretRef != "" {
 		volumeName := "etcd-peer-tls"
-		podVolumes = append(podVolumes,corev1.Volume{
-			Name:         volumeName,
+		podVolumes = append(podVolumes, corev1.Volume{
+			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
-				Secret:   &corev1.SecretVolumeSource{
-					SecretName:  cr.Spec.EtcdPeerSecretRef,
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cr.Spec.EtcdClientSecretRef,
 				},
 			},
 		})
-		etcdVolumes = append(etcdVolumes,corev1.VolumeMount{
-			Name:             volumeName,
-			ReadOnly:         true,
-			MountPath:        fmt.Sprintf("/%s",volumeName),
+		etcdVolumes = append(etcdVolumes, corev1.VolumeMount{
+			Name:      volumeName,
+			ReadOnly:  true,
+			MountPath: fmt.Sprintf("/%s", volumeName),
 		})
-		etcdCommand = append(etcdCommand,fmt.Sprintf("--cert=/%s/peer.crt",volumeName))
-		etcdCommand = append(etcdCommand,fmt.Sprintf("--key=/%s/peer.key",volumeName))
-		etcdCommand = append(etcdCommand,fmt.Sprintf( "--cacert=/%s/peer-ca.crt",volumeName))
+		etcdCommand = append(etcdCommand, fmt.Sprintf("--cert-file=/%s/etcd-client.crt", volumeName))
+		etcdCommand = append(etcdCommand, fmt.Sprintf("--key-file=/%s/etcd-client.key", volumeName))
+		etcdCommand = append(etcdCommand, fmt.Sprintf("--trusted-ca-file=/%s/etcd-client-ca.crt", volumeName))
 	}
-
 
 	etcdProxy := corev1.Container{
-		Name: "etcd",
-		Image: "quay.io/coreos/etcd:v3.4.3",
-		Command: etcdCommand,
+		Name:         "etcd",
+		Image:        "quay.io/coreos/etcd:v3.4.3",
+		Command:      etcdCommand,
 		VolumeMounts: etcdVolumes,
 	}
-
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
