@@ -135,8 +135,19 @@ func (r *ReconcileKubernetes) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{}, err
 	}
 
+	labels := map[string]string{
+		"kubernetes": instance.Name,
+	}
+
+	// Define required configmaps
+	kubeconfig := getKubeconfigCM(instance, labels)
+
 	// Define a new Pod object
-	pod := newPodForCR(instance)
+	pod := newPodForCR(instance, labels)
+
+	if err := controllerutil.SetControllerReference(instance, kubeconfig, r.scheme); err != nil {
+		return reconcile.Result{}, err
+	}
 
 	// Set Kubernetes instance as the owner and controller
 	if err := controllerutil.SetControllerReference(instance, pod, r.scheme); err != nil {
@@ -192,15 +203,8 @@ func getPodsForSvc(svc *corev1.Service, namespace string, kubecli kubernetes.Int
 	return pods, nil
 }
 
-// newPodForCR returns a integrated kubernetes control plane pod with the same name/namespace as the cr
-func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
-	labels := map[string]string{
-		"kubernetes": cr.Name,
-	}
-
-	podVolumes := []corev1.Volume{}
-
-	kubernetesApiServer := corev1.Container{
+func getKubernetesApiServerContainer(cr *appv1alpha1.Kubernetes) corev1.Container {
+	return corev1.Container{
 		Name:    "kube-apiserver",
 		Image:   fmt.Sprintf("k8s.gcr.io/hyperkube:v%s", cr.Spec.Version),
 		Command: []string{"kube-apiserver", "--etcd-servers=http://localhost:2379", "--authorization-mode=AlwaysAllow"},
@@ -223,7 +227,69 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 			},
 		},
 	}
+}
 
+func getKubernetesSchedulerContainer(cr *appv1alpha1.Kubernetes) corev1.Container {
+	kubernetesScheduler := corev1.Container{
+		Name:    "kube-scheduler",
+		Image:   fmt.Sprintf("k8s.gcr.io/hyperkube:v%s", cr.Spec.Version),
+		Command: []string{"kube-scheduler", "--master=http://localhost:8080"},
+		Env: []corev1.EnvVar{
+			{
+				Name: "KUBERNETES_SERVICE_HOST",
+			},
+			{
+				Name: "KUBERNETES_SERVICE_PORT",
+			},
+			{
+				Name: "KUBERNETES_SERVICE_HTTPS_PORT",
+			},
+		},
+	}
+	return kubernetesScheduler
+}
+
+func getKubernetesControllerManagerContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volume) corev1.Container {
+	volumeName := "kubeconfig"
+	kubeconfig := []corev1.VolumeMount{}
+
+	podVolumes = append(podVolumes, corev1.Volume{
+		Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: "kubeconfig",
+				},
+			},
+		},
+	})
+	kubeconfig = append(kubeconfig, corev1.VolumeMount{
+		Name:      volumeName,
+		ReadOnly:  true,
+		MountPath: "/etc/kubernetes",
+	})
+
+	kubernetesControllerManager := corev1.Container{
+		Name:         "kube-controller-manager",
+		Image:        fmt.Sprintf("k8s.gcr.io/hyperkube:v%s", cr.Spec.Version),
+		Command:      []string{"kube-controller-manager", "--kubeconfig=/etc/kubernetes/kubeconfig", "--bind-address=127.0.0.1"},
+		VolumeMounts: kubeconfig,
+		Env: []corev1.EnvVar{
+			{
+				Name: "KUBERNETES_SERVICE_HOST",
+			},
+			{
+				Name: "KUBERNETES_SERVICE_PORT",
+			},
+			{
+				Name: "KUBERNETES_SERVICE_HTTPS_PORT",
+			},
+		},
+	}
+	return kubernetesControllerManager
+}
+
+func getEtcdProxyContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volume, kubecli kubernetes.Interface) corev1.Container {
 	var etcdServiceNs string
 	if cr.Spec.EtcdServiceNamespace != "" {
 		etcdServiceNs = "default"
@@ -231,7 +297,6 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		etcdServiceNs = cr.Spec.EtcdServiceNamespace
 	}
 
-	kubecli := MustNewKubeClient()
 	etcdService, _ := getSvc(cr.Spec.EtcdService, etcdServiceNs, kubecli)
 	etcdPods, _ := getPodsForSvc(etcdService, etcdServiceNs, kubecli)
 
@@ -244,7 +309,7 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		etcdPeers = append(etcdPeers, fmt.Sprintf("%s.%s.svc:2379", pod.Name, pod.Namespace))
 	}
 
-	etcdCommand = append(etcdCommand, "--endpoints=%s", strings.Join(etcdPeers, ","))
+	etcdCommand = append(etcdCommand, fmt.Sprintf("--endpoints=%s", strings.Join(etcdPeers, ",")))
 
 	etcdVolumes := []corev1.VolumeMount{}
 
@@ -274,12 +339,47 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 		etcdCommand = append(etcdCommand, fmt.Sprintf("--trusted-ca-file=/%s/etcd-client-ca.crt", volumeName))
 	}
 
-	etcdProxy := corev1.Container{
+	return corev1.Container{
 		Name:         "etcd",
 		Image:        "quay.io/coreos/etcd:v3.4.3",
 		Command:      etcdCommand,
 		VolumeMounts: etcdVolumes,
 	}
+}
+
+func getKubeconfigCM(cr *appv1alpha1.Kubernetes, labels map[string]string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Name,
+			Namespace: cr.Namespace,
+			Labels:    labels,
+		},
+		Data: map[string]string{
+			"kubeconfig": `apiVersion: v1
+kind: Config
+clusters:
+  - cluster:
+      server: http://127.0.0.1:8080
+	name: kubernetes
+contexts: null
+current-context: ""
+preferences: {}
+users: null`,
+		},
+	}
+}
+
+// newPodForCR returns a integrated kubernetes control plane pod with the same name/namespace as the cr
+func newPodForCR(cr *appv1alpha1.Kubernetes, labels map[string]string) *corev1.Pod {
+
+	kubecli := MustNewKubeClient()
+
+	podVolumes := []corev1.Volume{}
+
+	kubernetesApiServer := getKubernetesApiServerContainer(cr)
+	kubernetesScheduler := getKubernetesSchedulerContainer(cr)
+	kubernetesControllerManager := getKubernetesControllerManagerContainer(cr, podVolumes)
+	etcdProxy := getEtcdProxyContainer(cr, podVolumes, kubecli)
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -291,6 +391,8 @@ func newPodForCR(cr *appv1alpha1.Kubernetes) *corev1.Pod {
 			Volumes: podVolumes,
 			Containers: []corev1.Container{
 				kubernetesApiServer,
+				kubernetesScheduler,
+				kubernetesControllerManager,
 				etcdProxy,
 			},
 		},
