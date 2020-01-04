@@ -24,6 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	"github.com/davecgh/go-spew/spew"
 )
 
 var log = logf.Log.WithName("controller_kubernetes")
@@ -96,6 +98,12 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
+	// Watch for changes on Owned ConfigMaps
+	err = c.Watch(&source.Kind{Type: &corev1.ConfigMap{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &appv1alpha1.Kubernetes{},
+	})
+
 	return nil
 }
 
@@ -145,12 +153,28 @@ func (r *ReconcileKubernetes) Reconcile(request reconcile.Request) (reconcile.Re
 	// Define a new Pod object
 	pod := newPodForCR(instance, labels)
 
+	// Set Kubernetes instance as the owner and controller
 	if err := controllerutil.SetControllerReference(instance, kubeconfig, r.scheme); err != nil {
 		return reconcile.Result{}, err
 	}
 
-	// Set Kubernetes instance as the owner and controller
 	if err := controllerutil.SetControllerReference(instance, pod, r.scheme); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	// Check if this Pod already exists
+	foundConfig := &corev1.ConfigMap{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: kubeconfig.Name, Namespace: pod.Namespace}, foundConfig)
+	if err != nil && errors.IsNotFound(err) {
+		reqLogger.Info("Creating a new ConfigMap", "ConfigMap.Namespace", kubeconfig.Namespace, "ConfigMap.Name", kubeconfig.Name)
+		err = r.client.Create(context.TODO(), kubeconfig) // TODO: error handling
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+
+		// Pod created successfully - don't requeue
+		//return reconcile.Result{}, nil
+	} else if err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -159,6 +183,7 @@ func (r *ReconcileKubernetes) Reconcile(request reconcile.Request) (reconcile.Re
 	err = r.client.Get(context.TODO(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
 		reqLogger.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		spew.Dump(pod)
 		err = r.client.Create(context.TODO(), pod)
 		if err != nil {
 			return reconcile.Result{}, err
@@ -249,31 +274,43 @@ func getKubernetesSchedulerContainer(cr *appv1alpha1.Kubernetes) corev1.Containe
 	return kubernetesScheduler
 }
 
-func getKubernetesControllerManagerContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volume) corev1.Container {
-	volumeName := "kubeconfig"
-	kubeconfig := []corev1.VolumeMount{}
+func getKubernetesControllerManagerContainer(cr *appv1alpha1.Kubernetes, podVolumes *[]corev1.Volume) corev1.Container {
+	volumeName := fmt.Sprintf("kube-controller-manager-kubeconfig-%s", cr.Name)
+	controllerManagerMounts := []corev1.VolumeMount{}
 
-	podVolumes = append(podVolumes, corev1.Volume{
+	pv := *podVolumes
+
+	*podVolumes = append(pv, corev1.Volume{
 		Name: volumeName,
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{
-					Name: "kubeconfig",
+					Name: volumeName,
 				},
 			},
 		},
 	})
-	kubeconfig = append(kubeconfig, corev1.VolumeMount{
-		Name:      volumeName,
-		ReadOnly:  true,
+	controllerManagerMounts = append(controllerManagerMounts, corev1.VolumeMount{
+		Name: volumeName,
+		//		ReadOnly:  true,
 		MountPath: "/etc/kubernetes",
 	})
 
 	kubernetesControllerManager := corev1.Container{
 		Name:         "kube-controller-manager",
 		Image:        fmt.Sprintf("k8s.gcr.io/hyperkube:v%s", cr.Spec.Version),
-		Command:      []string{"kube-controller-manager", "--kubeconfig=/etc/kubernetes/kubeconfig", "--bind-address=127.0.0.1"},
-		VolumeMounts: kubeconfig,
+		VolumeMounts: controllerManagerMounts,
+		Command: []string{"kube-controller-manager",
+			"--kubeconfig=/etc/kubernetes/kubeconfig",
+			"--bind-address=127.0.0.1",
+			"--allocate-node-cidrs=true",
+			"--cluster-cidr=10.244.0.0/16",            // template me
+			"--service-cluster-ip-range=10.96.0.0/12", // template me
+			"--node-cidr-mask-size=24",                // template me
+			"--leader-elect=true",
+			"--use-service-account-credentials=true",
+			"--controllers=*,bootstrapsigner,tokencleaner",
+		},
 		Env: []corev1.EnvVar{
 			{
 				Name: "KUBERNETES_SERVICE_HOST",
@@ -289,8 +326,10 @@ func getKubernetesControllerManagerContainer(cr *appv1alpha1.Kubernetes, podVolu
 	return kubernetesControllerManager
 }
 
-func getEtcdProxyContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volume, kubecli kubernetes.Interface) corev1.Container {
+func getEtcdProxyContainer(cr *appv1alpha1.Kubernetes, podVolumes *[]corev1.Volume, kubecli kubernetes.Interface) corev1.Container {
 	var etcdServiceNs string
+	pv := *podVolumes
+
 	if cr.Spec.EtcdServiceNamespace != "" {
 		etcdServiceNs = "default"
 	} else {
@@ -311,7 +350,7 @@ func getEtcdProxyContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volum
 
 	etcdCommand = append(etcdCommand, fmt.Sprintf("--endpoints=%s", strings.Join(etcdPeers, ",")))
 
-	etcdVolumes := []corev1.VolumeMount{}
+	etcdMounts := []corev1.VolumeMount{}
 
 	if cr.Spec.EtcdNamespace != "" {
 		etcdCommand = append(etcdCommand, fmt.Sprintf("--namespace=%s", cr.Spec.EtcdNamespace))
@@ -321,7 +360,7 @@ func getEtcdProxyContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volum
 
 	if cr.Spec.EtcdClientSecretRef != "" {
 		volumeName := "etcd-peer-tls"
-		podVolumes = append(podVolumes, corev1.Volume{
+		*podVolumes = append(pv, corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
@@ -329,7 +368,8 @@ func getEtcdProxyContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volum
 				},
 			},
 		})
-		etcdVolumes = append(etcdVolumes, corev1.VolumeMount{
+
+		etcdMounts = append(etcdMounts, corev1.VolumeMount{
 			Name:      volumeName,
 			ReadOnly:  true,
 			MountPath: fmt.Sprintf("/%s", volumeName),
@@ -343,28 +383,28 @@ func getEtcdProxyContainer(cr *appv1alpha1.Kubernetes, podVolumes []corev1.Volum
 		Name:         "etcd",
 		Image:        "quay.io/coreos/etcd:v3.4.3",
 		Command:      etcdCommand,
-		VolumeMounts: etcdVolumes,
+		VolumeMounts: etcdMounts,
 	}
 }
 
 func getKubeconfigCM(cr *appv1alpha1.Kubernetes, labels map[string]string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cr.Name,
+			Name:      fmt.Sprintf("kube-controller-manager-kubeconfig-%s", cr.Name),
 			Namespace: cr.Namespace,
 			Labels:    labels,
 		},
 		Data: map[string]string{
-			"kubeconfig": `apiVersion: v1
+			"kubeconfig": string(`apiVersion: v1
 kind: Config
 clusters:
   - cluster:
       server: http://127.0.0.1:8080
-	name: kubernetes
+    name: kubernetes
 contexts: null
 current-context: ""
 preferences: {}
-users: null`,
+users: null`),
 		},
 	}
 }
@@ -378,8 +418,8 @@ func newPodForCR(cr *appv1alpha1.Kubernetes, labels map[string]string) *corev1.P
 
 	kubernetesApiServer := getKubernetesApiServerContainer(cr)
 	kubernetesScheduler := getKubernetesSchedulerContainer(cr)
-	kubernetesControllerManager := getKubernetesControllerManagerContainer(cr, podVolumes)
-	etcdProxy := getEtcdProxyContainer(cr, podVolumes, kubecli)
+	kubernetesControllerManager := getKubernetesControllerManagerContainer(cr, &podVolumes)
+	etcdProxy := getEtcdProxyContainer(cr, &podVolumes, kubecli)
 
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
